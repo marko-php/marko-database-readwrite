@@ -75,6 +75,15 @@ function makeMySqlTestConnection(bool $failOnQuery = false): ConnectionInterface
         {
             return $callback();
         }
+
+        public function transactionLevel(): int
+        {
+            return 0;
+        }
+
+        public function afterCommit(callable $callback): void {}
+
+        public function afterRollback(callable $callback): void {}
     };
 }
 

@@ -104,6 +104,23 @@ function makeConnection(array $overrides = []): ConnectionInterface&TransactionI
 
             return $callback();
         }
+
+        public function transactionLevel(): int
+        {
+            $this->calls[] = 'transactionLevel';
+
+            return $this->overrides['transactionLevel'] ?? 0;
+        }
+
+        public function afterCommit(callable $callback): void
+        {
+            $this->calls[] = ['afterCommit', $callback];
+        }
+
+        public function afterRollback(callable $callback): void
+        {
+            $this->calls[] = ['afterRollback', $callback];
+        }
     };
 }
 
@@ -199,6 +216,15 @@ function makeThrowingConnection(string $message = 'connection refused'): Connect
         {
             return $callback();
         }
+
+        public function transactionLevel(): int
+        {
+            return 0;
+        }
+
+        public function afterCommit(callable $callback): void {}
+
+        public function afterRollback(callable $callback): void {}
     };
 }
 
@@ -421,6 +447,59 @@ describe('ReadWriteConnection', function (): void {
             ->and($replica->calls)->toBeEmpty();
     });
 
+    it('delegates transactionLevel to the write connection', function (): void {
+        $write = makeConnection(['transactionLevel' => 2]);
+        $replica = makeConnection();
+
+        $conn = new ReadWriteConnection($write, [$replica], makeSelector($replica));
+
+        expect($conn->transactionLevel())->toBe(2)
+            ->and($write->calls)->toContain('transactionLevel')
+            ->and($replica->calls)->toBeEmpty();
+    });
+
+    it('delegates afterCommit to the write connection', function (): void {
+        $write = makeConnection();
+        $replica = makeConnection();
+        $callback = function (): void {};
+
+        $conn = new ReadWriteConnection($write, [$replica], makeSelector($replica));
+        $conn->afterCommit($callback);
+
+        expect($write->calls)->toContain(['afterCommit', $callback])
+            ->and($replica->calls)->toBeEmpty();
+    });
+
+    it('delegates afterRollback to the write connection', function (): void {
+        $write = makeConnection();
+        $replica = makeConnection();
+        $callback = function (): void {};
+
+        $conn = new ReadWriteConnection($write, [$replica], makeSelector($replica));
+        $conn->afterRollback($callback);
+
+        expect($write->calls)->toContain(['afterRollback', $callback])
+            ->and($replica->calls)->toBeEmpty();
+    });
+
+    it(
+        'keeps reads on the write connection after a nested transaction returns inside an outer transaction',
+        function (): void {
+            $write = makeConnection(['query' => [['id' => 1]]]);
+            $replica = makeConnection(['query' => [['id' => 99]]]);
+
+            $conn = new ReadWriteConnection($write, [$replica], makeSelector($replica));
+            $result = $conn->transaction(function () use ($conn): array {
+                $conn->transaction(function (): void {});
+
+                return $conn->query('SELECT 1');
+            });
+
+            expect($result)->toBe([['id' => 1]])
+                ->and($replica->calls)->toBeEmpty();
+        },
+    );
+
     it('returns the transaction callback result', function (): void {
         $write = makeConnection();
         $replica = makeConnection();
@@ -569,7 +648,7 @@ describe('ReadWriteConnection', function (): void {
     });
 
     it('rolls back an open transaction when reset', function (): void {
-        $write = makeConnection(['inTransaction' => true]);
+        $write = makeConnection(['transactionLevel' => 1]);
         $replica = makeConnection();
         $selector = makeSelector($replica);
 
@@ -579,8 +658,32 @@ describe('ReadWriteConnection', function (): void {
         expect($write->calls)->toContain('rollback');
     });
 
+    it('rolls back every open level when reset inside nested transactions', function (): void {
+        $write = makeConnection(['transactionLevel' => 3]);
+        $replica = makeConnection();
+
+        $conn = new ReadWriteConnection($write, [$replica], makeSelector($replica));
+        $conn->reset();
+
+        expect(array_count_values(array_filter($write->calls, 'is_string'))['rollback'])->toBe(3);
+    });
+
+    it('delegates reset to a resettable write connection', function (): void {
+        $write = $this->createMockForIntersectionOfInterfaces([
+            ConnectionInterface::class,
+            TransactionInterface::class,
+            ResettableInterface::class,
+        ]);
+        $write->expects($this->once())->method('reset');
+        $write->expects($this->never())->method('rollback');
+        $replica = makeConnection();
+
+        $conn = new ReadWriteConnection($write, [$replica], makeSelector($replica));
+        $conn->reset();
+    });
+
     it('does not attempt a rollback when no transaction is open', function (): void {
-        $write = makeConnection(['inTransaction' => false]);
+        $write = makeConnection(['transactionLevel' => 0]);
         $replica = makeConnection();
         $selector = makeSelector($replica);
 
@@ -592,7 +695,7 @@ describe('ReadWriteConnection', function (): void {
 
     it('still clears sticky write state when reset', function (): void {
         $write = makeConnection([
-            'inTransaction' => true,
+            'transactionLevel' => 1,
             'query' => [['id' => 99]],
         ]);
         $replica = makeConnection(['query' => [['id' => 99]]]);
@@ -609,7 +712,7 @@ describe('ReadWriteConnection', function (): void {
 
     it('clears sticky write state even when the rollback fails', function (): void {
         $write = makeConnection([
-            'inTransaction' => true,
+            'transactionLevel' => 1,
             'rollback' => new PDOException('rollback failed'),
             'query' => [['id' => 1]],
         ]);
@@ -738,6 +841,15 @@ describe('ReadWriteConnection', function (): void {
             {
                 return $callback();
             }
+
+            public function transactionLevel(): int
+            {
+                return 0;
+            }
+
+            public function afterCommit(callable $callback): void {}
+
+            public function afterRollback(callable $callback): void {}
         };
 
         $good = makeConnection(['query' => [['id' => 1]]]);

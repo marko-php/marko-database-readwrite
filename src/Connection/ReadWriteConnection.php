@@ -121,15 +121,36 @@ class ReadWriteConnection implements ConnectionInterface, TransactionInterface, 
         return $this->write->inTransaction();
     }
 
+    public function transactionLevel(): int
+    {
+        return $this->write->transactionLevel();
+    }
+
+    /**
+     * Routes every read inside the callback to the write connection, then
+     * restores the sticky flag it had before the call. A nested transaction()
+     * therefore leaves the outer transaction's reads on the write connection.
+     */
     public function transaction(callable $callback): mixed
     {
+        $wasSticky = $this->stickyWrite;
         $this->stickyWrite = true;
 
         try {
             return $this->write->transaction($callback);
         } finally {
-            $this->stickyWrite = false;
+            $this->stickyWrite = $wasSticky;
         }
+    }
+
+    public function afterCommit(callable $callback): void
+    {
+        $this->write->afterCommit($callback);
+    }
+
+    public function afterRollback(callable $callback): void
+    {
+        $this->write->afterRollback($callback);
     }
 
     public function resetStickyState(): void
@@ -141,6 +162,10 @@ class ReadWriteConnection implements ConnectionInterface, TransactionInterface, 
      * Rolls back a transaction abandoned by a request that threw before
      * commit()/rollback(), then clears the sticky-write flag.
      *
+     * A resettable write connection resets itself (rolling back every level
+     * and dropping pending callbacks). Otherwise every open level is rolled
+     * back, innermost first, so no savepoint leaves the outer transaction open.
+     *
      * The rollback runs first (inside try) and the sticky-state reset
      * runs in finally so it always happens, even if the rollback itself
      * throws. The exception is intentionally not swallowed here: a
@@ -151,8 +176,12 @@ class ReadWriteConnection implements ConnectionInterface, TransactionInterface, 
     public function reset(): void
     {
         try {
-            if ($this->write->inTransaction()) {
-                $this->write->rollback();
+            if ($this->write instanceof ResettableInterface) {
+                $this->write->reset();
+            } else {
+                for ($level = $this->write->transactionLevel(); $level > 0; $level--) {
+                    $this->write->rollback();
+                }
             }
         } finally {
             $this->resetStickyState();

@@ -82,6 +82,13 @@ function makeConnection(
             return $this->overrides['driverName'] ?? 'mysql';
         }
 
+        public function supportsReturning(): bool
+        {
+            $this->calls[] = 'supportsReturning';
+
+            return $this->overrides['supportsReturning'] ?? false;
+        }
+
         public function beginTransaction(): void
         {
             $this->calls[] = 'beginTransaction';
@@ -228,6 +235,13 @@ function makeThrowingConnection(
             return 'mysql';
         }
 
+        public function supportsReturning(): bool
+        {
+            $this->calls[] = 'supportsReturning';
+
+            return $this->overrides['supportsReturning'] ?? false;
+        }
+
         public function beginTransaction(): void {}
 
         public function commit(): void {}
@@ -332,6 +346,37 @@ describe('ReadWriteConnection', function (): void {
 
         expect($id)->toBe(99)
             ->and($write->calls)->toContain('lastInsertId')
+            ->and($replica->calls)->toBeEmpty();
+    });
+
+    it(
+        'makes the connection sticky to the write connection after a write statement runs through query',
+        function (): void {
+            $write = makeConnection(['query' => [['id' => 'generated']]]);
+            $replica = makeConnection();
+            $selector = makeSelector($replica);
+
+            $conn = new ReadWriteConnection($write, [$replica], $selector);
+            $conn->query('INSERT INTO tokens (name) VALUES (?) RETURNING id', ['api']);
+            $conn->query('SELECT * FROM tokens WHERE id = ?', ['generated']);
+
+            expect($write->calls)->toBe([
+                ['query', 'INSERT INTO tokens (name) VALUES (?) RETURNING id', ['api']],
+                ['query', 'SELECT * FROM tokens WHERE id = ?', ['generated']],
+            ])
+                ->and($replica->calls)->toBeEmpty();
+        },
+    );
+
+    it('delegates supportsReturning to the write connection', function (): void {
+        $write = makeConnection(['supportsReturning' => true]);
+        $replica = makeConnection();
+        $selector = makeSelector($replica);
+
+        $conn = new ReadWriteConnection($write, [$replica], $selector);
+
+        expect($conn->supportsReturning())->toBeTrue()
+            ->and($write->calls)->toContain('supportsReturning')
             ->and($replica->calls)->toBeEmpty();
     });
 
@@ -913,6 +958,11 @@ describe('ReadWriteConnection', function (): void {
             public function driverName(): string
             {
                 return 'mysql';
+            }
+
+            public function supportsReturning(): bool
+            {
+                return false;
             }
 
             public function beginTransaction(): void {}

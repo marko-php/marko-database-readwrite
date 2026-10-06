@@ -65,6 +65,11 @@ function makePgSqlTestConnection(
             return 'pgsql';
         }
 
+        public function supportsReturning(): bool
+        {
+            return true;
+        }
+
         public function beginTransaction(): void {}
 
         public function commit(): void {}

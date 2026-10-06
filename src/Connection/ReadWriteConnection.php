@@ -38,7 +38,13 @@ class ReadWriteConnection implements ConnectionInterface, TransactionInterface, 
         string $sql,
         array $bindings = [],
     ): array {
-        if ($this->stickyWrite || $this->isWriteStatement($sql)) {
+        if ($this->isWriteStatement($sql)) {
+            // A write that returns rows (INSERT ... RETURNING) sticks to the
+            // write connection like execute() does, so reads see it.
+            $this->stickyWrite = true;
+        }
+
+        if ($this->stickyWrite) {
             return $this->write->query($sql, $bindings);
         }
 
@@ -88,6 +94,11 @@ class ReadWriteConnection implements ConnectionInterface, TransactionInterface, 
     public function driverName(): string
     {
         return $this->write->driverName();
+    }
+
+    public function supportsReturning(): bool
+    {
+        return $this->write->supportsReturning();
     }
 
     public function connect(): void

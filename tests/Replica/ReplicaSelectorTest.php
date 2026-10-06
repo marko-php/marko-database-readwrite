@@ -172,5 +172,10 @@ function createFakeConnection(): ConnectionInterface
         {
             return 'mysql';
         }
+
+        public function supportsReturning(): bool
+        {
+            return false;
+        }
     };
 }

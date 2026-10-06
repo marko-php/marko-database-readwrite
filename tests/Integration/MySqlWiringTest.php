@@ -62,6 +62,11 @@ function makeMySqlTestConnection(
             return 'mysql';
         }
 
+        public function supportsReturning(): bool
+        {
+            return false;
+        }
+
         public function beginTransaction(): void {}
 
         public function commit(): void {}

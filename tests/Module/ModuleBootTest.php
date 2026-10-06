@@ -102,18 +102,20 @@ function makeConfigRepository(
     string $driver = 'readwrite',
     string $readStrategy = 'random',
     array $extraReads = [],
+    ?string $timezone = null,
 ): ConfigRepositoryInterface {
     $reads = array_merge(
         [['driver' => 'mysql', 'host' => 'read-host-1', 'port' => 3306, 'database' => 'db', 'username' => 'root', 'password' => '']],
         $extraReads,
     );
 
-    return new readonly class ($driver, $readStrategy, $reads) implements ConfigRepositoryInterface
+    return new readonly class ($driver, $readStrategy, $reads, $timezone) implements ConfigRepositoryInterface
     {
         public function __construct(
             private string $driver,
             private string $readStrategy,
             private array $reads,
+            private ?string $timezone,
         ) {}
 
         public function get(
@@ -122,6 +124,7 @@ function makeConfigRepository(
         ): mixed {
             return match ($key) {
                 'database.driver' => $this->driver,
+                'database.timezone' => $this->timezone ?? throw new RuntimeException('database.timezone is not set'),
                 'database.connections' => [
                     'write' => ['driver' => 'mysql', 'host' => 'write-host', 'port' => 3306, 'database' => 'db', 'username' => 'root', 'password' => ''],
                     'read' => $this->reads,
@@ -135,7 +138,7 @@ function makeConfigRepository(
             string $key,
             ?string $scope = null,
         ): bool {
-            return true;
+            return $key !== 'database.timezone' || $this->timezone !== null;
         }
 
         public function getString(
@@ -424,5 +427,41 @@ describe('module boot callback', function (): void {
         $selector = $selectorProp->getValue($rwConn);
 
         expect($selector)->toBeInstanceOf(WeightedReplicaSelector::class);
+    });
+    it('builds the write and read connections with the top-level database timezone', function (): void {
+        $factory = makeSpyFactory();
+        $container = makeTestContainer(makeConfigRepository(timezone: 'America/New_York'), $factory);
+
+        getBootCallback()($container);
+
+        expect(array_map(
+            static fn (DatabaseConfig $config): string => $config->timezone->getName(),
+            $factory->receivedConfigs,
+        ))->toBe(['America/New_York', 'America/New_York']);
+    });
+
+    it('builds the nodes in UTC when database.timezone is not set', function (): void {
+        $factory = makeSpyFactory();
+        $container = makeTestContainer(makeConfigRepository(), $factory);
+
+        getBootCallback()($container);
+
+        expect(array_map(
+            static fn (DatabaseConfig $config): string => $config->timezone->getName(),
+            $factory->receivedConfigs,
+        ))->toBe(['UTC', 'UTC']);
+    });
+
+    it('overrides a per-node timezone with the top-level database timezone', function (): void {
+        $factory = makeSpyFactory();
+        $replica = ['driver' => 'mysql', 'host' => 'read-host-2', 'port' => 3306, 'database' => 'db', 'username' => 'root', 'password' => '', 'timezone' => 'Asia/Tokyo'];
+        $container = makeTestContainer(
+            makeConfigRepository(extraReads: [$replica], timezone: 'Europe/Paris'),
+            $factory,
+        );
+
+        getBootCallback()($container);
+
+        expect($factory->receivedConfigs[2]->timezone->getName())->toBe('Europe/Paris');
     });
 });

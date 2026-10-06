@@ -89,6 +89,14 @@ function makeConnection(
             return $this->overrides['supportsReturning'] ?? false;
         }
 
+        public function quoteIdentifier(
+            string $identifier,
+        ): string {
+            $this->calls[] = 'quoteIdentifier';
+
+            return '"' . str_replace('"', '""', $identifier) . '"';
+        }
+
         public function beginTransaction(): void
         {
             $this->calls[] = 'beginTransaction';
@@ -242,6 +250,12 @@ function makeThrowingConnection(
             return $this->overrides['supportsReturning'] ?? false;
         }
 
+        public function quoteIdentifier(
+            string $identifier,
+        ): string {
+            return '"' . str_replace('"', '""', $identifier) . '"';
+        }
+
         public function beginTransaction(): void {}
 
         public function commit(): void {}
@@ -377,6 +391,18 @@ describe('ReadWriteConnection', function (): void {
 
         expect($conn->supportsReturning())->toBeTrue()
             ->and($write->calls)->toContain('supportsReturning')
+            ->and($replica->calls)->toBeEmpty();
+    });
+
+    it('delegates quoteIdentifier to the write connection', function (): void {
+        $write = makeConnection();
+        $replica = makeConnection();
+        $selector = makeSelector($replica);
+
+        $conn = new ReadWriteConnection($write, [$replica], $selector);
+
+        expect($conn->quoteIdentifier('group'))->toBe('"group"')
+            ->and($write->calls)->toContain('quoteIdentifier')
             ->and($replica->calls)->toBeEmpty();
     });
 
@@ -963,6 +989,12 @@ describe('ReadWriteConnection', function (): void {
             public function supportsReturning(): bool
             {
                 return false;
+            }
+
+            public function quoteIdentifier(
+                string $identifier,
+            ): string {
+                return '"' . str_replace('"', '""', $identifier) . '"';
             }
 
             public function beginTransaction(): void {}

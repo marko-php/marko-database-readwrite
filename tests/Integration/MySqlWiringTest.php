@@ -67,6 +67,12 @@ function makeMySqlTestConnection(
             return false;
         }
 
+        public function quoteIdentifier(
+            string $identifier,
+        ): string {
+            return '"' . str_replace('"', '""', $identifier) . '"';
+        }
+
         public function beginTransaction(): void {}
 
         public function commit(): void {}

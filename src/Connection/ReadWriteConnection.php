@@ -101,6 +101,12 @@ class ReadWriteConnection implements ConnectionInterface, TransactionInterface, 
         return $this->write->supportsReturning();
     }
 
+    public function quoteIdentifier(
+        string $identifier,
+    ): string {
+        return $this->write->quoteIdentifier($identifier);
+    }
+
     public function connect(): void
     {
         $this->write->connect();

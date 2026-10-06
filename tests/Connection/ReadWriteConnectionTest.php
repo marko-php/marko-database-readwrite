@@ -22,6 +22,9 @@ function makeConnection(
         /** @var list<int> */
         public array $transactionAttempts = [];
 
+        /** @var list<int|Closure|null> */
+        public array $transactionBackoffs = [];
+
         public function __construct(private readonly array $overrides) {}
 
         public function connect(): void
@@ -108,9 +111,11 @@ function makeConnection(
         public function transaction(
             callable $callback,
             int $attempts = 1,
+            int|Closure|null $backoff = null,
         ): mixed {
             $this->calls[] = 'transaction';
             $this->transactionAttempts[] = $attempts;
+            $this->transactionBackoffs[] = $backoff;
 
             return $callback();
         }
@@ -237,6 +242,7 @@ function makeThrowingConnection(
         public function transaction(
             callable $callback,
             int $attempts = 1,
+            int|Closure|null $backoff = null,
         ): mixed {
             return $callback();
         }
@@ -481,6 +487,20 @@ describe('ReadWriteConnection', function (): void {
         $conn->transaction(function (): void {}, attempts: 3);
 
         expect($write->transactionAttempts)->toBe([3])
+            ->and($replica->calls)->toBeEmpty();
+    });
+
+    it('passes the backoff to the write connection', function (): void {
+        $write = makeConnection();
+        $replica = makeConnection();
+        $custom = fn (int $attempt): int => $attempt * 10;
+
+        $conn = new ReadWriteConnection($write, [$replica], makeSelector($replica));
+        $conn->transaction(function (): void {}, attempts: 3, backoff: 25);
+        $conn->transaction(function (): void {}, attempts: 3, backoff: $custom);
+        $conn->transaction(function (): void {});
+
+        expect($write->transactionBackoffs)->toBe([25, $custom, null])
             ->and($replica->calls)->toBeEmpty();
     });
 
@@ -909,6 +929,7 @@ describe('ReadWriteConnection', function (): void {
             public function transaction(
                 callable $callback,
                 int $attempts = 1,
+                int|Closure|null $backoff = null,
             ): mixed {
                 return $callback();
             }

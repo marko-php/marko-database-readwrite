@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Marko\Database\ReadWrite\Connection;
 
+use Closure;
 use Marko\Core\Contracts\ResettableInterface;
 use Marko\Core\Exceptions\MarkoException;
 use Marko\Database\Connection\ConnectionInterface;
@@ -135,20 +136,22 @@ class ReadWriteConnection implements ConnectionInterface, TransactionInterface, 
      * restores the sticky flag it had before the call. A nested transaction()
      * therefore leaves the outer transaction's reads on the write connection.
      *
-     * $attempts is passed to the write connection, which owns the retry.
+     * $attempts and $backoff are passed to the write connection, which owns
+     * the retry and the wait between attempts.
      *
-     * @throws TransactionException|TransactionConflictException When $attempts is below 1, or when the last
-     *     attempt still conflicts
+     * @throws TransactionException|TransactionConflictException When $attempts is below 1, $backoff is
+     *     negative, or the last attempt still conflicts
      */
     public function transaction(
         callable $callback,
         int $attempts = 1,
+        int|Closure|null $backoff = null,
     ): mixed {
         $wasSticky = $this->stickyWrite;
         $this->stickyWrite = true;
 
         try {
-            return $this->write->transaction($callback, $attempts);
+            return $this->write->transaction($callback, $attempts, $backoff);
         } finally {
             $this->stickyWrite = $wasSticky;
         }

@@ -79,6 +79,7 @@ function makePgSqlTestConnection(
         public function transaction(
             callable $callback,
             int $attempts = 1,
+            int|Closure|null $backoff = null,
         ): mixed {
             return $callback();
         }

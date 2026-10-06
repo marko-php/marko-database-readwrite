@@ -15,25 +15,27 @@ composer require marko/database-readwrite
 
 declare(strict_types=1);
 
+use Marko\Config\Env;
+
 return [
     'driver' => 'readwrite',
     'connections' => [
         'write' => [
             'driver'   => 'pgsql',
-            'host'     => $_ENV['DB_WRITE_HOST'] ?? 'localhost',
-            'port'     => (int) ($_ENV['DB_WRITE_PORT'] ?? 5432),
-            'database' => $_ENV['DB_DATABASE'] ?? 'marko',
-            'username' => $_ENV['DB_USERNAME'] ?? 'postgres',
-            'password' => $_ENV['DB_PASSWORD'] ?? '',
+            'host'     => Env::string('DB_WRITE_HOST', 'localhost'),
+            'port'     => Env::int('DB_WRITE_PORT', 5432, min: 1, max: 65535),
+            'database' => Env::string('DB_DATABASE', 'marko'),
+            'username' => Env::string('DB_USERNAME', 'postgres'),
+            'password' => Env::string('DB_PASSWORD', ''),
         ],
         'read' => [
             [
                 'driver'   => 'pgsql',
-                'host'     => $_ENV['DB_READ_HOST'] ?? 'replica-1',
-                'port'     => (int) ($_ENV['DB_READ_PORT'] ?? 5432),
-                'database' => $_ENV['DB_DATABASE'] ?? 'marko',
-                'username' => $_ENV['DB_USERNAME'] ?? 'postgres',
-                'password' => $_ENV['DB_PASSWORD'] ?? '',
+                'host'     => Env::string('DB_READ_HOST', 'replica-1'),
+                'port'     => Env::int('DB_READ_PORT', 5432, min: 1, max: 65535),
+                'database' => Env::string('DB_DATABASE', 'marko'),
+                'username' => Env::string('DB_USERNAME', 'postgres'),
+                'password' => Env::string('DB_PASSWORD', ''),
             ],
         ],
         'read_strategy' => 'random',

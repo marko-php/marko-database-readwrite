@@ -12,8 +12,9 @@ use Marko\Database\Connection\TransactionInterface;
 use Marko\Database\ReadWrite\Connection\ReadWriteConnection;
 use Marko\Database\ReadWrite\Replica\WeightedReplicaSelector;
 
-function makeMySqlTestConnection(bool $failOnQuery = false): ConnectionInterface&TransactionInterface
-{
+function makeMySqlTestConnection(
+    bool $failOnQuery = false,
+): ConnectionInterface&TransactionInterface {
     return new readonly class ($failOnQuery) implements ConnectionInterface, TransactionInterface
     {
         public function __construct(private bool $failOnQuery) {}
@@ -45,8 +46,9 @@ function makeMySqlTestConnection(bool $failOnQuery = false): ConnectionInterface
             return 1;
         }
 
-        public function prepare(string $sql): StatementInterface
-        {
+        public function prepare(
+            string $sql,
+        ): StatementInterface {
             throw new RuntimeException('Not implemented');
         }
 
@@ -71,8 +73,10 @@ function makeMySqlTestConnection(bool $failOnQuery = false): ConnectionInterface
             return false;
         }
 
-        public function transaction(callable $callback): mixed
-        {
+        public function transaction(
+            callable $callback,
+            int $attempts = 1,
+        ): mixed {
             return $callback();
         }
 
@@ -168,20 +172,23 @@ function makeMySqlConfigRepository(
             return [];
         }
 
-        public function all(?string $scope = null): array
-        {
+        public function all(
+            ?string $scope = null,
+        ): array {
             return [];
         }
 
-        public function withScope(string $scope): ConfigRepositoryInterface
-        {
+        public function withScope(
+            string $scope,
+        ): ConfigRepositoryInterface {
             return $this;
         }
     };
 }
 
-function makeMySqlSpyFactory(bool $failFirstReplica = false): ConnectionFactoryInterface
-{
+function makeMySqlSpyFactory(
+    bool $failFirstReplica = false,
+): ConnectionFactoryInterface {
     return new class ($failFirstReplica) implements ConnectionFactoryInterface
     {
         public int $callCount = 0;
@@ -194,8 +201,9 @@ function makeMySqlSpyFactory(bool $failFirstReplica = false): ConnectionFactoryI
 
         public function __construct(private bool $failFirstReplica) {}
 
-        public function make(DatabaseConfig $config): ConnectionInterface
-        {
+        public function make(
+            DatabaseConfig $config,
+        ): ConnectionInterface {
             $this->callCount++;
             $this->receivedConfigs[] = $config;
 
@@ -212,8 +220,10 @@ function makeMySqlSpyFactory(bool $failFirstReplica = false): ConnectionFactoryI
     };
 }
 
-function makeMySqlContainer(ConfigRepositoryInterface $config, ConnectionFactoryInterface $factory): ContainerInterface
-{
+function makeMySqlContainer(
+    ConfigRepositoryInterface $config,
+    ConnectionFactoryInterface $factory,
+): ContainerInterface {
     return new class ($config, $factory) implements ContainerInterface
     {
         /** @var array<string, object> */
@@ -224,8 +234,9 @@ function makeMySqlContainer(ConfigRepositoryInterface $config, ConnectionFactory
             private ConnectionFactoryInterface $factory,
         ) {}
 
-        public function get(string $id): mixed
-        {
+        public function get(
+            string $id,
+        ): mixed {
             return match ($id) {
                 ConfigRepositoryInterface::class => $this->config,
                 ConnectionFactoryInterface::class => $this->factory,
@@ -233,8 +244,9 @@ function makeMySqlContainer(ConfigRepositoryInterface $config, ConnectionFactory
             };
         }
 
-        public function has(string $id): bool
-        {
+        public function has(
+            string $id,
+        ): bool {
             return true;
         }
 
@@ -247,16 +259,18 @@ function makeMySqlContainer(ConfigRepositoryInterface $config, ConnectionFactory
             $this->registered[$id] = $instance;
         }
 
-        public function call(Closure $callable): mixed
-        {
+        public function call(
+            Closure $callable,
+        ): mixed {
             return $callable($this);
         }
 
         /**
          * @return array<string, object>
          */
-        public function resolvedInstances(?string $interface = null): array
-        {
+        public function resolvedInstances(
+            ?string $interface = null,
+        ): array {
             return [];
         }
     };

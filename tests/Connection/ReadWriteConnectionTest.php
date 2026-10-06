@@ -12,13 +12,17 @@ use Marko\Database\ReadWrite\Connection\ReadWriteConnection;
 use Marko\Database\ReadWrite\Exceptions\ReadException;
 use Marko\Database\ReadWrite\Replica\ReplicaSelectorInterface;
 
-function makeConnection(array $overrides = []): ConnectionInterface&TransactionInterface
-{
+function makeConnection(
+    array $overrides = [],
+): ConnectionInterface&TransactionInterface {
     return new class ($overrides) implements ConnectionInterface, TransactionInterface, PendingAfterCommitInterface
     {
         public array $calls = [];
 
-        public function __construct(private array $overrides) {}
+        /** @var list<int> */
+        public array $transactionAttempts = [];
+
+        public function __construct(private readonly array $overrides) {}
 
         public function connect(): void
         {
@@ -53,8 +57,9 @@ function makeConnection(array $overrides = []): ConnectionInterface&TransactionI
             return $this->overrides['execute'] ?? 1;
         }
 
-        public function prepare(string $sql): StatementInterface
-        {
+        public function prepare(
+            string $sql,
+        ): StatementInterface {
             $this->calls[] = ['prepare', $sql];
 
             return $this->overrides['prepare'] ?? throw new RuntimeException('Not implemented');
@@ -100,9 +105,12 @@ function makeConnection(array $overrides = []): ConnectionInterface&TransactionI
             return $this->overrides['inTransaction'] ?? false;
         }
 
-        public function transaction(callable $callback): mixed
-        {
+        public function transaction(
+            callable $callback,
+            int $attempts = 1,
+        ): mixed {
             $this->calls[] = 'transaction';
+            $this->transactionAttempts[] = $attempts;
 
             return $callback();
         }
@@ -114,13 +122,15 @@ function makeConnection(array $overrides = []): ConnectionInterface&TransactionI
             return $this->overrides['transactionLevel'] ?? 0;
         }
 
-        public function afterCommit(callable $callback): void
-        {
+        public function afterCommit(
+            callable $callback,
+        ): void {
             $this->calls[] = ['afterCommit', $callback];
         }
 
-        public function afterRollback(callable $callback): void
-        {
+        public function afterRollback(
+            callable $callback,
+        ): void {
             $this->calls[] = ['afterRollback', $callback];
         }
 
@@ -131,14 +141,16 @@ function makeConnection(array $overrides = []): ConnectionInterface&TransactionI
     };
 }
 
-function makeSelector(ConnectionInterface $replica): ReplicaSelectorInterface
-{
+function makeSelector(
+    ConnectionInterface $replica,
+): ReplicaSelectorInterface {
     return new readonly class ($replica) implements ReplicaSelectorInterface
     {
         public function __construct(private ConnectionInterface $replica) {}
 
-        public function select(array $replicas): ConnectionInterface
-        {
+        public function select(
+            array $replicas,
+        ): ConnectionInterface {
             return $this->replica;
         }
     };
@@ -151,8 +163,9 @@ function makeSequentialSelector(): ReplicaSelectorInterface
 {
     return new class () implements ReplicaSelectorInterface
     {
-        public function select(array $replicas): ConnectionInterface
-        {
+        public function select(
+            array $replicas,
+        ): ConnectionInterface {
             return $replicas[0];
         }
     };
@@ -161,13 +174,14 @@ function makeSequentialSelector(): ReplicaSelectorInterface
 /**
  * Create a connection whose query() throws a PDOException.
  */
-function makeThrowingConnection(string $message = 'connection refused'): ConnectionInterface&TransactionInterface
-{
+function makeThrowingConnection(
+    string $message = 'connection refused',
+): ConnectionInterface&TransactionInterface {
     return new class ($message) implements ConnectionInterface, TransactionInterface
     {
         public array $calls = [];
 
-        public function __construct(private string $message) {}
+        public function __construct(private readonly string $message) {}
 
         public function connect(): void {}
 
@@ -193,8 +207,9 @@ function makeThrowingConnection(string $message = 'connection refused'): Connect
             return 0;
         }
 
-        public function prepare(string $sql): StatementInterface
-        {
+        public function prepare(
+            string $sql,
+        ): StatementInterface {
             throw new RuntimeException('Not implemented');
         }
 
@@ -219,8 +234,10 @@ function makeThrowingConnection(string $message = 'connection refused'): Connect
             return false;
         }
 
-        public function transaction(callable $callback): mixed
-        {
+        public function transaction(
+            callable $callback,
+            int $attempts = 1,
+        ): mixed {
             return $callback();
         }
 
@@ -265,8 +282,9 @@ describe('ReadWriteConnection', function (): void {
     it('routes prepare to the write connection', function (): void {
         $statement = new class () implements StatementInterface
         {
-            public function execute(array $bindings = []): bool
-            {
+            public function execute(
+                array $bindings = [],
+            ): bool {
                 return true;
             }
 
@@ -354,10 +372,11 @@ describe('ReadWriteConnection', function (): void {
         {
             public int $selectCallCount = 0;
 
-            public function __construct(private ConnectionInterface $replica) {}
+            public function __construct(private readonly ConnectionInterface $replica) {}
 
-            public function select(array $replicas): ConnectionInterface
-            {
+            public function select(
+                array $replicas,
+            ): ConnectionInterface {
                 $this->selectCallCount++;
 
                 return $this->replica;
@@ -452,6 +471,27 @@ describe('ReadWriteConnection', function (): void {
 
         expect($write->calls)->toContain('transaction')
             ->and($replica->calls)->toBeEmpty();
+    });
+
+    it('delegates the attempts argument of transaction to the write connection', function (): void {
+        $write = makeConnection();
+        $replica = makeConnection();
+
+        $conn = new ReadWriteConnection($write, [$replica], makeSelector($replica));
+        $conn->transaction(function (): void {}, attempts: 3);
+
+        expect($write->transactionAttempts)->toBe([3])
+            ->and($replica->calls)->toBeEmpty();
+    });
+
+    it('delegates one attempt by default', function (): void {
+        $write = makeConnection();
+        $replica = makeConnection();
+
+        $conn = new ReadWriteConnection($write, [$replica], makeSelector($replica));
+        $conn->transaction(function (): void {});
+
+        expect($write->transactionAttempts)->toBe([1]);
     });
 
     it('delegates transactionLevel to the write connection', function (): void {
@@ -839,8 +879,9 @@ describe('ReadWriteConnection', function (): void {
                 return 0;
             }
 
-            public function prepare(string $sql): StatementInterface
-            {
+            public function prepare(
+                string $sql,
+            ): StatementInterface {
                 throw new RuntimeException('Not implemented');
             }
 
@@ -865,8 +906,10 @@ describe('ReadWriteConnection', function (): void {
                 return false;
             }
 
-            public function transaction(callable $callback): mixed
-            {
+            public function transaction(
+                callable $callback,
+                int $attempts = 1,
+            ): mixed {
                 return $callback();
             }
 
@@ -970,7 +1013,7 @@ describe('ReadWriteConnection', function (): void {
     });
 
     it(
-        'routes a write statement to the primary even when it has leading whitespace or a leading SQL comment before the INSERT/UPDATE/DELETE keyword (case-insensitive)',
+        'routes a write statement to the primary despite leading whitespace, comments or lowercase keywords',
         function (): void {
             $write = makeConnection(['query' => [['id' => 1]]]);
             $replica = makeConnection(['query' => [['id' => 99]]]);

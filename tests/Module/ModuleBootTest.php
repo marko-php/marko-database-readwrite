@@ -40,8 +40,9 @@ function makeTestConnection(): ConnectionInterface&TransactionInterface
             return 0;
         }
 
-        public function prepare(string $sql): StatementInterface
-        {
+        public function prepare(
+            string $sql,
+        ): StatementInterface {
             throw new RuntimeException('Not implemented');
         }
 
@@ -66,8 +67,10 @@ function makeTestConnection(): ConnectionInterface&TransactionInterface
             return false;
         }
 
-        public function transaction(callable $callback): mixed
-        {
+        public function transaction(
+            callable $callback,
+            int $attempts = 1,
+        ): mixed {
             return $callback();
         }
 
@@ -164,20 +167,24 @@ function makeConfigRepository(
             return [];
         }
 
-        public function all(?string $scope = null): array
-        {
+        public function all(
+            ?string $scope = null,
+        ): array {
             return [];
         }
 
-        public function withScope(string $scope): ConfigRepositoryInterface
-        {
+        public function withScope(
+            string $scope,
+        ): ConfigRepositoryInterface {
             return $this;
         }
     };
 }
 
-function makeTestContainer(ConfigRepositoryInterface $config, ConnectionFactoryInterface $factory): ContainerInterface
-{
+function makeTestContainer(
+    ConfigRepositoryInterface $config,
+    ConnectionFactoryInterface $factory,
+): ContainerInterface {
     return new class ($config, $factory) implements ContainerInterface
     {
         /** @var array<string, object> */
@@ -188,8 +195,9 @@ function makeTestContainer(ConfigRepositoryInterface $config, ConnectionFactoryI
             private readonly ConnectionFactoryInterface $factory,
         ) {}
 
-        public function get(string $id): mixed
-        {
+        public function get(
+            string $id,
+        ): mixed {
             return match ($id) {
                 ConfigRepositoryInterface::class => $this->config,
                 ConnectionFactoryInterface::class => $this->factory,
@@ -197,8 +205,9 @@ function makeTestContainer(ConfigRepositoryInterface $config, ConnectionFactoryI
             };
         }
 
-        public function has(string $id): bool
-        {
+        public function has(
+            string $id,
+        ): bool {
             return true;
         }
 
@@ -211,16 +220,18 @@ function makeTestContainer(ConfigRepositoryInterface $config, ConnectionFactoryI
             $this->registered[$id] = $instance;
         }
 
-        public function call(Closure $callable): mixed
-        {
+        public function call(
+            Closure $callable,
+        ): mixed {
             return $callable($this);
         }
 
         /**
          * @return array<string, object>
          */
-        public function resolvedInstances(?string $interface = null): array
-        {
+        public function resolvedInstances(
+            ?string $interface = null,
+        ): array {
             return [];
         }
     };
@@ -238,8 +249,9 @@ function makeSpyFactory(): ConnectionFactoryInterface
         /** @var array<ConnectionInterface> */
         public array $createdConnections = [];
 
-        public function make(DatabaseConfig $config): ConnectionInterface
-        {
+        public function make(
+            DatabaseConfig $config,
+        ): ConnectionInterface {
             $this->callCount++;
             $this->receivedConfigs[] = $config;
             $conn = makeTestConnection();
@@ -380,13 +392,15 @@ describe('module boot callback', function (): void {
                 return [];
             }
 
-            public function all(?string $scope = null): array
-            {
+            public function all(
+                ?string $scope = null,
+            ): array {
                 return [];
             }
 
-            public function withScope(string $scope): ConfigRepositoryInterface
-            {
+            public function withScope(
+                string $scope,
+            ): ConfigRepositoryInterface {
                 return $this;
             }
         };

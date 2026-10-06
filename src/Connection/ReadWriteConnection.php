@@ -10,6 +10,7 @@ use Marko\Database\Connection\ConnectionInterface;
 use Marko\Database\Connection\PendingAfterCommitInterface;
 use Marko\Database\Connection\StatementInterface;
 use Marko\Database\Connection\TransactionInterface;
+use Marko\Database\Exceptions\TransactionConflictException;
 use Marko\Database\Exceptions\TransactionException;
 use Marko\Database\ReadWrite\Exceptions\ReadException;
 use Marko\Database\ReadWrite\Replica\ReplicaSelectorInterface;
@@ -72,8 +73,9 @@ class ReadWriteConnection implements ConnectionInterface, TransactionInterface, 
         return $this->write->execute($sql, $bindings);
     }
 
-    public function prepare(string $sql): StatementInterface
-    {
+    public function prepare(
+        string $sql,
+    ): StatementInterface {
         return $this->write->prepare($sql);
     }
 
@@ -132,26 +134,35 @@ class ReadWriteConnection implements ConnectionInterface, TransactionInterface, 
      * Routes every read inside the callback to the write connection, then
      * restores the sticky flag it had before the call. A nested transaction()
      * therefore leaves the outer transaction's reads on the write connection.
+     *
+     * $attempts is passed to the write connection, which owns the retry.
+     *
+     * @throws TransactionException|TransactionConflictException When $attempts is below 1, or when the last
+     *     attempt still conflicts
      */
-    public function transaction(callable $callback): mixed
-    {
+    public function transaction(
+        callable $callback,
+        int $attempts = 1,
+    ): mixed {
         $wasSticky = $this->stickyWrite;
         $this->stickyWrite = true;
 
         try {
-            return $this->write->transaction($callback);
+            return $this->write->transaction($callback, $attempts);
         } finally {
             $this->stickyWrite = $wasSticky;
         }
     }
 
-    public function afterCommit(callable $callback): void
-    {
+    public function afterCommit(
+        callable $callback,
+    ): void {
         $this->write->afterCommit($callback);
     }
 
-    public function afterRollback(callable $callback): void
-    {
+    public function afterRollback(
+        callable $callback,
+    ): void {
         $this->write->afterRollback($callback);
     }
 
@@ -214,8 +225,9 @@ class ReadWriteConnection implements ConnectionInterface, TransactionInterface, 
      * routing to ensure correct behaviour. With ... INSERT ... RETURNING should use
      * execute() instead.
      */
-    private function isWriteStatement(string $sql): bool
-    {
+    private function isWriteStatement(
+        string $sql,
+    ): bool {
         $trimmed = ltrim($sql);
 
         // Strip a leading line comment: -- ...

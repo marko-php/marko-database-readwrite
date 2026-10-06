@@ -9,6 +9,7 @@ use Marko\Core\Contracts\ResettableInterface;
 use Marko\Core\Exceptions\MarkoException;
 use Marko\Database\Connection\ConnectionInterface;
 use Marko\Database\Connection\PendingAfterCommitInterface;
+use Marko\Database\Connection\PrimaryReadInterface;
 use Marko\Database\Connection\StatementInterface;
 use Marko\Database\Connection\TransactionInterface;
 use Marko\Database\Exceptions\TransactionConflictException;
@@ -18,9 +19,29 @@ use Marko\Database\ReadWrite\Replica\ReplicaSelectorInterface;
 use Override;
 use PDOException;
 
-class ReadWriteConnection implements ConnectionInterface, TransactionInterface, PendingAfterCommitInterface, ResettableInterface
+class ReadWriteConnection implements
+    ConnectionInterface,
+    TransactionInterface,
+    PendingAfterCommitInterface,
+    PrimaryReadInterface,
+    ResettableInterface
 {
+    /**
+     * Keywords that start a statement which may write. WITH is included
+     * because a CTE can end in INSERT/UPDATE/DELETE/MERGE, and CALL because a
+     * stored procedure can write; neither can be told apart from a read
+     * without parsing the statement.
+     */
+    private const string WRITE_KEYWORDS = 'INSERT|UPDATE|DELETE|WITH|MERGE|REPLACE|CALL';
+
     private bool $stickyWrite = false;
+
+    /**
+     * Set by every write routed through this connection. transaction() and
+     * onPrimary() read it to decide whether reads stay on the write
+     * connection after their callback returns.
+     */
+    private bool $wrote = false;
 
     /**
      * @param ConnectionInterface[] $replicas
@@ -41,7 +62,7 @@ class ReadWriteConnection implements ConnectionInterface, TransactionInterface, 
         if ($this->isWriteStatement($sql)) {
             // A write that returns rows (INSERT ... RETURNING) sticks to the
             // write connection like execute() does, so reads see it.
-            $this->stickyWrite = true;
+            $this->markWritten();
         }
 
         if ($this->stickyWrite) {
@@ -75,7 +96,7 @@ class ReadWriteConnection implements ConnectionInterface, TransactionInterface, 
         string $sql,
         array $bindings = [],
     ): int {
-        $this->stickyWrite = true;
+        $this->markWritten();
 
         return $this->write->execute($sql, $bindings);
     }
@@ -83,6 +104,12 @@ class ReadWriteConnection implements ConnectionInterface, TransactionInterface, 
     public function prepare(
         string $sql,
     ): StatementInterface {
+        if ($this->isWriteStatement($sql)) {
+            // The statement runs on the write connection once executed, so
+            // reads after it stick there too.
+            $this->markWritten();
+        }
+
         return $this->write->prepare($sql);
     }
 
@@ -149,9 +176,12 @@ class ReadWriteConnection implements ConnectionInterface, TransactionInterface, 
     }
 
     /**
-     * Routes every read inside the callback to the write connection, then
-     * restores the sticky flag it had before the call. A nested transaction()
-     * therefore leaves the outer transaction's reads on the write connection.
+     * Routes every read inside the callback to the write connection. When the
+     * callback wrote nothing, the sticky flag it had before the call is
+     * restored afterwards; when it wrote anything, later reads stay on the
+     * write connection so they see the write instead of a lagging replica. A
+     * nested transaction() leaves the outer transaction's reads on the write
+     * connection either way.
      *
      * $attempts and $backoff are passed to the write connection, which owns
      * the retry and the wait between attempts.
@@ -164,14 +194,21 @@ class ReadWriteConnection implements ConnectionInterface, TransactionInterface, 
         int $attempts = 1,
         int|Closure|null $backoff = null,
     ): mixed {
-        $wasSticky = $this->stickyWrite;
-        $this->stickyWrite = true;
+        return $this->stickWhile(
+            fn (): mixed => $this->write->transaction($callback, $attempts, $backoff),
+        );
+    }
 
-        try {
-            return $this->write->transaction($callback, $attempts, $backoff);
-        } finally {
-            $this->stickyWrite = $wasSticky;
-        }
+    /**
+     * Routes every read inside the callback to the write connection, for reads
+     * that must not see a lagging replica (session lookups, "token used"
+     * checks). Routing goes back to what it was afterwards, unless the
+     * callback wrote something.
+     */
+    public function onPrimary(
+        callable $callback,
+    ): mixed {
+        return $this->stickWhile($callback);
     }
 
     public function afterCommit(
@@ -201,6 +238,34 @@ class ReadWriteConnection implements ConnectionInterface, TransactionInterface, 
     public function resetStickyState(): void
     {
         $this->stickyWrite = false;
+        $this->wrote = false;
+    }
+
+    private function markWritten(): void
+    {
+        $this->stickyWrite = true;
+        $this->wrote = true;
+    }
+
+    /**
+     * Run the callback with reads on the write connection, then restore the
+     * previous sticky flag unless the callback wrote anything.
+     */
+    private function stickWhile(
+        callable $callback,
+    ): mixed {
+        $wasSticky = $this->stickyWrite;
+        $wroteBefore = $this->wrote;
+        $this->stickyWrite = true;
+        $this->wrote = false;
+
+        try {
+            return $callback();
+        } finally {
+            $wroteInside = $this->wrote;
+            $this->wrote = $wroteBefore || $wroteInside;
+            $this->stickyWrite = $wasSticky || $wroteInside;
+        }
     }
 
     /**
@@ -234,33 +299,55 @@ class ReadWriteConnection implements ConnectionInterface, TransactionInterface, 
     }
 
     /**
-     * Detects whether a SQL statement is a write operation (INSERT, UPDATE, DELETE).
+     * Detects whether a SQL statement may write: one whose first keyword is
+     * INSERT, UPDATE, DELETE, WITH, MERGE, REPLACE or CALL.
      *
-     * Leading whitespace and a leading SQL line comment (-- ...) or block comment
-     * (/* ... *\/) are stripped before sniffing the first keyword, case-insensitively.
-     *
-     * NOTE (v1 limitation): CTEs — a leading WITH clause whose final DML is INSERT/
-     * UPDATE/DELETE — are NOT detected here and will route to a replica. Use execute()
-     * or beginTransaction()/commit() for write CTEs, or call resetStickyState() after
-     * routing to ensure correct behaviour. With ... INSERT ... RETURNING should use
-     * execute() instead.
+     * Leading whitespace and any number of leading comments (-- ..., # ... and
+     * /* ... *\/) are stripped before sniffing the first keyword,
+     * case-insensitively, so a comment cannot hide a write from the router.
+     * A WITH (CTE) read is treated as a write and served by the primary, which
+     * is the safe side: a write sent to a replica could be applied there, or
+     * lost.
      */
     private function isWriteStatement(
         string $sql,
     ): bool {
+        $trimmed = $this->stripLeadingComments($sql);
+
+        return (bool) preg_match('/^(' . self::WRITE_KEYWORDS . ')\b/i', $trimmed);
+    }
+
+    private function stripLeadingComments(
+        string $sql,
+    ): string {
         $trimmed = ltrim($sql);
 
-        // Strip a leading line comment: -- ...
-        if (str_starts_with($trimmed, '--')) {
-            $trimmed = ltrim(substr($trimmed, (int) strpos($trimmed, "\n") + 1));
-        }
+        while (true) {
+            if (str_starts_with($trimmed, '--') || str_starts_with($trimmed, '#')) {
+                $newline = strpos($trimmed, "\n");
 
-        // Strip a leading block comment: /* ... */
-        if (str_starts_with($trimmed, '/*')) {
-            $end = strpos($trimmed, '*/');
-            $trimmed = $end !== false ? ltrim(substr($trimmed, $end + 2)) : $trimmed;
-        }
+                if ($newline === false) {
+                    return '';
+                }
 
-        return (bool) preg_match('/^(INSERT|UPDATE|DELETE)\b/i', $trimmed);
+                $trimmed = ltrim(substr($trimmed, $newline + 1));
+
+                continue;
+            }
+
+            if (str_starts_with($trimmed, '/*')) {
+                $end = strpos($trimmed, '*/', 2);
+
+                if ($end === false) {
+                    return '';
+                }
+
+                $trimmed = ltrim(substr($trimmed, $end + 2));
+
+                continue;
+            }
+
+            return $trimmed;
+        }
     }
 }

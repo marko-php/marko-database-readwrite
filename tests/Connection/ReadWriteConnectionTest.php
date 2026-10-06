@@ -5,6 +5,7 @@ declare(strict_types=1);
 use Marko\Core\Contracts\ResettableInterface;
 use Marko\Database\Connection\ConnectionInterface;
 use Marko\Database\Connection\PendingAfterCommitInterface;
+use Marko\Database\Connection\PrimaryReadInterface;
 use Marko\Database\Connection\StatementInterface;
 use Marko\Database\Connection\TransactionInterface;
 use Marko\Database\Exceptions\TransactionException;
@@ -1162,4 +1163,163 @@ describe('ReadWriteConnection', function (): void {
             ->and($replica->calls)->toContain(['query', 'SELECT 1', []])
             ->and($write->calls)->not->toContain(['query', 'SELECT 1', []]);
     });
+});
+
+describe('primary routing for stale-sensitive reads', function (): void {
+    it('implements PrimaryReadInterface', function (): void {
+        $conn = new ReadWriteConnection(makeConnection(), [makeConnection()], makeSelector(makeConnection()));
+
+        expect($conn)->toBeInstanceOf(PrimaryReadInterface::class);
+    })->issue(390);
+
+    it('routes reads inside onPrimary() to the write connection and returns the callback result', function (): void {
+        $write = makeConnection(['query' => [['id' => 1]]]);
+        $replica = makeConnection(['query' => [['id' => 99]]]);
+        $conn = new ReadWriteConnection($write, [$replica], makeSelector($replica));
+
+        $result = $conn->onPrimary(fn (): array => $conn->query('SELECT payload FROM sessions WHERE id = ?', ['abc']));
+
+        expect($result)->toBe([['id' => 1]])
+            ->and($write->calls)->toContain(['query', 'SELECT payload FROM sessions WHERE id = ?', ['abc']])
+            ->and($replica->calls)->toBeEmpty();
+    })->issue(390);
+
+    it('sends reads back to a replica after an onPrimary() callback that wrote nothing', function (): void {
+        $write = makeConnection(['query' => [['id' => 1]]]);
+        $replica = makeConnection(['query' => [['id' => 99]]]);
+        $conn = new ReadWriteConnection($write, [$replica], makeSelector($replica));
+
+        $conn->onPrimary(fn (): array => $conn->query('SELECT 1'));
+
+        expect($conn->query('SELECT 2'))->toBe([['id' => 99]])
+            ->and($replica->calls)->toBe([['query', 'SELECT 2', []]]);
+    })->issue(390);
+
+    it('keeps reads on the write connection after an onPrimary() callback that wrote', function (): void {
+        $write = makeConnection(['query' => [['id' => 1]]]);
+        $replica = makeConnection(['query' => [['id' => 99]]]);
+        $conn = new ReadWriteConnection($write, [$replica], makeSelector($replica));
+
+        $conn->onPrimary(fn (): int => $conn->execute('DELETE FROM sessions WHERE id = ?', ['abc']));
+
+        expect($conn->query('SELECT 2'))->toBe([['id' => 1]])
+            ->and($replica->calls)->toBeEmpty();
+    })->issue(390);
+
+    it('restores the sticky flag after onPrimary() even when the callback throws', function (): void {
+        $write = makeConnection(['query' => [['id' => 1]]]);
+        $replica = makeConnection(['query' => [['id' => 99]]]);
+        $conn = new ReadWriteConnection($write, [$replica], makeSelector($replica));
+
+        try {
+            $conn->onPrimary(function (): never {
+                throw new RuntimeException('boom');
+            });
+        } catch (RuntimeException) {
+            // expected
+        }
+
+        expect($conn->query('SELECT 1'))->toBe([['id' => 99]]);
+    })->issue(390);
+
+    it('keeps reads on the write connection after a transaction() that executed a write', function (): void {
+        $write = makeConnection(['query' => [['id' => 1]]]);
+        $replica = makeConnection(['query' => [['id' => 99]]]);
+        $conn = new ReadWriteConnection($write, [$replica], makeSelector($replica));
+
+        $conn->transaction(function () use ($conn): void {
+            $conn->execute('DELETE FROM sessions WHERE id = ?', ['abc']);
+        });
+
+        expect($conn->query('SELECT 1'))->toBe([['id' => 1]])
+            ->and($replica->calls)->toBeEmpty();
+    })->issue(390);
+
+    it('keeps reads on the write connection after a transaction() that wrote through query()', function (): void {
+        $write = makeConnection(['query' => [['id' => 1]]]);
+        $replica = makeConnection(['query' => [['id' => 99]]]);
+        $conn = new ReadWriteConnection($write, [$replica], makeSelector($replica));
+
+        $conn->transaction(function () use ($conn): void {
+            $conn->query('INSERT INTO tokens (name) VALUES (?) RETURNING id', ['api']);
+        });
+
+        expect($conn->query('SELECT 1'))->toBe([['id' => 1]])
+            ->and($replica->calls)->toBeEmpty();
+    })->issue(390);
+
+    it('keeps reads on the write connection after a nested transaction() wrote', function (): void {
+        $write = makeConnection(['query' => [['id' => 1]]]);
+        $replica = makeConnection(['query' => [['id' => 99]]]);
+        $conn = new ReadWriteConnection($write, [$replica], makeSelector($replica));
+
+        $conn->transaction(function () use ($conn): void {
+            $conn->transaction(function () use ($conn): void {
+                $conn->execute('UPDATE users SET name = ?', ['x']);
+            });
+        });
+
+        expect($conn->query('SELECT 1'))->toBe([['id' => 1]])
+            ->and($replica->calls)->toBeEmpty();
+    })->issue(390);
+
+    it('routes reads to a replica again after resetStickyState() following a write', function (): void {
+        $write = makeConnection(['query' => [['id' => 1]]]);
+        $replica = makeConnection(['query' => [['id' => 99]]]);
+        $conn = new ReadWriteConnection($write, [$replica], makeSelector($replica));
+
+        $conn->transaction(function () use ($conn): void {
+            $conn->execute('DELETE FROM sessions');
+        });
+        $conn->resetStickyState();
+        $conn->transaction(function (): void {});
+
+        expect($conn->query('SELECT 1'))->toBe([['id' => 99]]);
+    })->issue(390);
+
+    it('makes the connection sticky when a write statement is prepared', function (): void {
+        $statement = $this->createStub(StatementInterface::class);
+        $write = makeConnection(['prepare' => $statement, 'query' => [['id' => 1]]]);
+        $replica = makeConnection(['query' => [['id' => 99]]]);
+        $conn = new ReadWriteConnection($write, [$replica], makeSelector($replica));
+
+        $conn->prepare('DELETE FROM sessions WHERE id = ?');
+
+        expect($conn->query('SELECT 1'))->toBe([['id' => 1]])
+            ->and($replica->calls)->toBeEmpty();
+    })->issue(390);
+
+    it('routes statements that may write to the write connection', function (string $sql): void {
+        $write = makeConnection(['query' => [['id' => 1]]]);
+        $replica = makeConnection(['query' => [['id' => 99]]]);
+        $conn = new ReadWriteConnection($write, [$replica], makeSelector($replica));
+
+        expect($conn->query($sql))->toBe([['id' => 1]])
+            ->and($write->calls)->toContain(['query', $sql, []])
+            ->and($replica->calls)->toBeEmpty();
+    })->with([
+        'WITH ... DELETE' => ['WITH old AS (SELECT id FROM sessions) DELETE FROM sessions USING old RETURNING id'],
+        'lowercase with ... update' => ['with t as (select 1) update users set x = 1 returning id'],
+        'MERGE' => ['MERGE INTO users u USING incoming i ON u.id = i.id WHEN MATCHED THEN UPDATE SET name = i.name'],
+        'REPLACE' => ['REPLACE INTO sessions (id, payload) VALUES (1, 2)'],
+        'CALL' => ['CALL purge_sessions()'],
+        'two leading line comments' => ["-- first\n-- second\nDELETE FROM sessions RETURNING id"],
+        'two leading block comments' => ['/* a */ /* b */ UPDATE users SET x = 1 RETURNING id'],
+        'mixed comments' => ["/* a */\n-- b\n# c\nINSERT INTO t VALUES (1) RETURNING id"],
+        'multi-line block comment' => ["/*\n * note\n */\nDELETE FROM t RETURNING id"],
+    ])->issue(390);
+
+    it('routes reads behind leading comments to a replica', function (string $sql): void {
+        $write = makeConnection(['query' => [['id' => 1]]]);
+        $replica = makeConnection(['query' => [['id' => 99]]]);
+        $conn = new ReadWriteConnection($write, [$replica], makeSelector($replica));
+
+        expect($conn->query($sql))->toBe([['id' => 99]])
+            ->and($write->calls)->not->toContain(['query', $sql, []]);
+    })->with([
+        'plain SELECT' => ['SELECT * FROM users'],
+        'SELECT behind comments' => ["/* a */ -- b\nSELECT * FROM users"],
+        'SELECT of an updated_at column' => ['SELECT updated_at FROM users'],
+        'SHOW' => ['SHOW TABLES'],
+    ])->issue(390);
 });

@@ -4,15 +4,17 @@ declare(strict_types=1);
 
 use Marko\Core\Contracts\ResettableInterface;
 use Marko\Database\Connection\ConnectionInterface;
+use Marko\Database\Connection\PendingAfterCommitInterface;
 use Marko\Database\Connection\StatementInterface;
 use Marko\Database\Connection\TransactionInterface;
+use Marko\Database\Exceptions\TransactionException;
 use Marko\Database\ReadWrite\Connection\ReadWriteConnection;
 use Marko\Database\ReadWrite\Exceptions\ReadException;
 use Marko\Database\ReadWrite\Replica\ReplicaSelectorInterface;
 
 function makeConnection(array $overrides = []): ConnectionInterface&TransactionInterface
 {
-    return new class ($overrides) implements ConnectionInterface, TransactionInterface
+    return new class ($overrides) implements ConnectionInterface, TransactionInterface, PendingAfterCommitInterface
     {
         public array $calls = [];
 
@@ -120,6 +122,11 @@ function makeConnection(array $overrides = []): ConnectionInterface&TransactionI
         public function afterRollback(callable $callback): void
         {
             $this->calls[] = ['afterRollback', $callback];
+        }
+
+        public function runPendingAfterCommitCallbacks(): void
+        {
+            $this->calls[] = 'runPendingAfterCommitCallbacks';
         }
     };
 }
@@ -468,6 +475,27 @@ describe('ReadWriteConnection', function (): void {
 
         expect($write->calls)->toContain(['afterCommit', $callback])
             ->and($replica->calls)->toBeEmpty();
+    });
+
+    it('delegates pending after-commit callbacks to the write connection', function (): void {
+        $write = makeConnection();
+        $replica = makeConnection();
+
+        $conn = new ReadWriteConnection($write, [$replica], makeSelector($replica));
+        $conn->runPendingAfterCommitCallbacks();
+
+        expect($write->calls)->toContain('runPendingAfterCommitCallbacks')
+            ->and($conn)->toBeInstanceOf(PendingAfterCommitInterface::class)
+            ->and($replica->calls)->toBeEmpty();
+    });
+
+    it('throws when the write connection cannot run pending after-commit callbacks', function (): void {
+        $replica = makeConnection();
+
+        $conn = new ReadWriteConnection(makeThrowingConnection(), [$replica], makeSelector($replica));
+
+        expect(fn () => $conn->runPendingAfterCommitCallbacks())
+            ->toThrow(TransactionException::class, 'cannot run pending after-commit callbacks');
     });
 
     it('delegates afterRollback to the write connection', function (): void {

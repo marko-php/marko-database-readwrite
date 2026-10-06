@@ -7,14 +7,16 @@ namespace Marko\Database\ReadWrite\Connection;
 use Marko\Core\Contracts\ResettableInterface;
 use Marko\Core\Exceptions\MarkoException;
 use Marko\Database\Connection\ConnectionInterface;
+use Marko\Database\Connection\PendingAfterCommitInterface;
 use Marko\Database\Connection\StatementInterface;
 use Marko\Database\Connection\TransactionInterface;
+use Marko\Database\Exceptions\TransactionException;
 use Marko\Database\ReadWrite\Exceptions\ReadException;
 use Marko\Database\ReadWrite\Replica\ReplicaSelectorInterface;
 use Override;
 use PDOException;
 
-class ReadWriteConnection implements ConnectionInterface, TransactionInterface, ResettableInterface
+class ReadWriteConnection implements ConnectionInterface, TransactionInterface, PendingAfterCommitInterface, ResettableInterface
 {
     private bool $stickyWrite = false;
 
@@ -151,6 +153,18 @@ class ReadWriteConnection implements ConnectionInterface, TransactionInterface, 
     public function afterRollback(callable $callback): void
     {
         $this->write->afterRollback($callback);
+    }
+
+    /**
+     * @throws TransactionException When the write connection cannot run pending callbacks
+     */
+    public function runPendingAfterCommitCallbacks(): void
+    {
+        if (!$this->write instanceof PendingAfterCommitInterface) {
+            throw TransactionException::cannotRunPendingAfterCommitCallbacks($this->write::class);
+        }
+
+        $this->write->runPendingAfterCommitCallbacks();
     }
 
     public function resetStickyState(): void
